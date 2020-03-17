@@ -56,7 +56,7 @@ class Client:
         value = 0
         for i in range(4):
             _byte, = self.sock.recv(1)
-            value |= (_byte & 127) << 7*(i+1)
+            value |= (_byte & 127) << 7*i
             if not _byte & 128:
                 break
         else:
@@ -106,7 +106,7 @@ class Client:
         self.host = host
         self.port = port
         self.keepalive = keepalive
-        self.reconnect()
+        return self.reconnect()
 
     def reconnect(self):
         if self.sock:
