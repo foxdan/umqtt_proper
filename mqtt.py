@@ -1,3 +1,30 @@
+"""MicroPython MQTT Client
+
+Implemented in accordance to 'MQTT Version 3.1.1 Plus Errata 01':
+http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/errata01/os/mqtt-v3.1.1-errata01-os-complete.html
+
+Roughly adheres to or has an API inspired by Eclipse Paho:
+https://www.eclipse.org/paho/clients/python/docs/
+
+Example usage:
+
+    ```
+    client = Client()
+    client.connect('127.0.0.1')
+    client.subscribe('my/cool/topic')
+    client.publish('my/other/topic', "UTF-8 supported string message")
+    while client.connected:
+        ping_response = client.loop_read()
+        if not ping_response:
+            client.ping()
+    ```
+
+TODO:
+  * QOS 2 support
+  * Callbacks for packets other than PUBLISH
+  * Retry PUBLISH packets for QOS > 0 packets
+
+"""
 import ucollections
 import uselect
 import usocket
@@ -33,6 +60,7 @@ class Client:
         self._size_buf = bytearray(4)
         self._packet_id = 1
         self.connected = False
+        # Default on_message() callback is a printer
         self.on_message = \
             lambda client, userdata, msg: print(msg.topic, msg.payload)
         self._pub_queue = []
@@ -71,6 +99,7 @@ class Client:
         self.sock.sendall(payload)
 
     def subscribe(self, *topics, qos=0):
+        # packet identifier loops around from 65535 to 1
         self._packet_id = self._packet_id + 1 & 0xffff or 1
         remaining = self._packet_id.to_bytes(2, 'big')
         for topic in topics:
@@ -81,11 +110,22 @@ class Client:
         return self._packet_id
 
     def publish(self, topic, message=None, qos=0, retain=False):
+        """Publish a MQTT message.
+
+        returns 0 if qos is 0
+        returns packet identifier if qos > 0
+
+        In the form: [fixed_header | topic_len | topic | id* | msg]
+          - id is only present if qos > 0
+
+        """
+        # Flags bitfield [qos|retain] = [00|0]
         flags = qos << 1 | retain
         topic = topic.encode('utf8')
         payload = len(topic).to_bytes(2, 'big')
         payload += topic
         if qos:
+            # packet identifier loops around from 65535 to 1
             self._packet_id = self._packet_id + 1 & 0xffff or 1
             payload += self._packet_id.to_bytes(2, 'big')
         payload += message.encode('utf8')
@@ -95,20 +135,24 @@ class Client:
             return self._packet_id
 
     def republish(self, flags, payload):
+        # Flags bitfield [dup|qos|retain] = [0|00|0]
         flags |= 1 << 3
         self._send(P_PUBLISH, flags=flags, payload=payload)
 
     def ping(self):
+        """Send a PINGREQ packet."""
         ctrl_pkt = P_PINGREQ << 4
         self.sock.sendall(ctrl_pkt.to_bytes(2, 'little'))
 
     def connect(self, host, port=1883, keepalive=60):
+        """Connect to server. Returns True if session exists on server."""
         self.host = host
         self.port = port
         self.keepalive = keepalive
         return self.reconnect()
 
     def reconnect(self):
+        """Reonnect to server. Returns True if session exists on server."""
         if self.sock:
             self.poll.unregister(self.sock)
             self.sock.close()
@@ -132,6 +176,7 @@ class Client:
 
     @staticmethod
     def _unpack_publish(data, retain, qos):
+        """Unpack a PUBLISH packet."""
         _data = memoryview(data)
         topic_len = int.from_bytes(_data[:2], 'big')
         _data = _data[2:]
@@ -146,6 +191,13 @@ class Client:
         return (pid, msg)
 
     def loop_read(self):
+        """Wait for (and process) data for half of keepalive time.
+
+        return True if a PINGRESP packet was seen.
+
+        Will call callback functions for appropriate packets.
+
+        """
         timeout = self.keepalive // 2
         ping_resp = False
         while self.poll.poll(timeout * 1000):
