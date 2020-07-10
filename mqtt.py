@@ -128,7 +128,8 @@ class Client:
             # packet identifier loops around from 65535 to 1
             self._packet_id = self._packet_id + 1 & 0xffff or 1
             payload += self._packet_id.to_bytes(2, 'big')
-        payload += message.encode('utf8')
+        if message:
+            payload += message.encode('utf8')
         self._send(P_PUBLISH, flags=flags, payload=payload)
         if qos:
             self._pub_queue.append((self._packet_id, flags, payload))
